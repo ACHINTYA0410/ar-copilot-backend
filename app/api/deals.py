@@ -152,4 +152,5 @@ async def update_deal(deal_id: str, payload: DealUpdate, db: AsyncSession = Depe
         )
 
     await db.flush()
+    await db.refresh(deal)
     return _to_deal_response(deal)
