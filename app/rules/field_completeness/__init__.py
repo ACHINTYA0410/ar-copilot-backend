@@ -1,0 +1,6 @@
+from app.rules.field_completeness.check_required_fields import CheckRequiredFieldsRule
+from app.rules.field_completeness.check_products_configured import CheckProductsConfiguredRule
+from app.rules.field_completeness.check_deal_stage import CheckDealStageRule
+from app.rules.field_completeness.check_zone_approval import CheckZoneApprovalRule
+from app.rules.field_completeness.check_onboarding_date import CheckOnboardingDateRule
+from app.rules.field_completeness.check_payment_terms import CheckPaymentTermsRule
