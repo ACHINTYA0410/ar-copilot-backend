@@ -1,16 +1,16 @@
 # AR Co-Pilot Backend
 
-AI-powered Accounts Receivable validation platform — Step B backend.
+AI-powered Accounts Receivable validation platform backend.
 
 ## Architecture
 
 ```
-Step A (done)   →  Frontend (React + Vite + Tailwind + shadcn/ui)
-Step B (this)   →  Backend (FastAPI + SQLite + mocked AI)
-Step C (next)   →  Replace ai_service.py with real Google ADK + Gemini
+Frontend (React + Vite + Tailwind + shadcn/ui)
+Backend (FastAPI + SQLite)
+AI Integration (Mocked or real Groq/Gemini calls)
 ```
 
-The mocked AI layer (`app/services/ai_service.py`) is the single swap point for Step C. Every other layer (engine, rules, API, SSE streaming) stays identical.
+The mocked AI layer (`app/services/ai_service.py`) can be swapped for real AI integrations. Every other layer (engine, rules, API, SSE streaming) stays identical.
 
 ## Quick Start
 
@@ -51,7 +51,7 @@ app/
   schemas/                 Pydantic v2 request/response schemas
   api/                     FastAPI route handlers
   services/
-    ai_service.py          MOCKED AI — swap this in Step C
+    ai_service.py          AI integration (mock or real)
     validation_engine.py   Async generator orchestrator
     audit_service.py       Wraps every state-changing action
     document_service.py    File storage (local ./uploads/)
@@ -106,15 +106,14 @@ es.onmessage = (e) => {
 };
 ```
 
-## Mocked AI (Step B → Step C swap)
+## AI Integration
 
 `app/services/ai_service.py` exposes:
 
 ```python
 class AIService:
     async def evaluate_rule(rule, deal_context, documents) -> RuleEvaluation:
-        # Step B: returns hardcoded responses with artificial 200-1500ms delay
-        # Step C: calls Gemini via Google ADK, same return type
+        # Returns rule evaluations (can use mock or real API calls)
 ```
 
 Demo deal **DL-12345** (Scholastic Solutions Pvt Ltd) returns exactly:
@@ -138,11 +137,11 @@ pytest tests/ -v
 
 15 tests covering deals CRUD, validation triggering, rules API, checklists, and audit log.
 
-## Step C Migration Checklist
+## AI Configuration
 
-To replace mocked AI with real Gemini calls:
+To replace mocked AI with real API calls:
 
-1. Set `AI_PROVIDER=gemini` and `GEMINI_API_KEY=...` in `.env`
-2. Rewrite `app/services/ai_service.py` — only the `evaluate_rule()` method body changes
-3. The `RuleEvaluation` dataclass return type is unchanged
-4. All rule modules, the validation engine, SSE streaming, and audit logging stay identical
+1. Set `AI_PROVIDER=groq` or `gemini` and the corresponding `API_KEY` in `.env`
+2. Update `app/services/ai_service.py` to use the provider.
+3. The `RuleEvaluation` dataclass return type is unchanged.
+4. All rule modules, the validation engine, SSE streaming, and audit logging stay identical.

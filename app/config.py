@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     MAX_UPLOAD_SIZE_MB: int = 10
 
     AI_PROVIDER: str = "mock"
+    GROQ_API_KEY: str | None = None
 
 
 settings = Settings()

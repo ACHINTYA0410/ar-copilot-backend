@@ -44,7 +44,7 @@ class DocumentService:
             "original_filename": file.filename or stored_filename,
             "file_path": str(file_path),
             "file_size": len(content),
-            "page_count": 0,  # PDF parsing deferred to Step C
+            "page_count": 0,  # PDF parsing deferred
         }
 
     def get_path(self, file_path: str) -> Path:
