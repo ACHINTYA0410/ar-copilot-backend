@@ -1,14 +1,18 @@
 """
-Mocked AI service for Step B.
-In Step C, replace evaluate_rule() with real Gemini/ADK calls.
-The interface (AIService.evaluate_rule) must not change between steps.
+AI service integration with Groq and mocked fallbacks.
 """
 import asyncio
 import random
 import time
+import json
+import logging
 from dataclasses import dataclass
 
+from groq import AsyncGroq
 from app.models.rule import Rule
+from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -405,8 +409,14 @@ class AIService:
         documents: list,
     ) -> RuleEvaluation:
         start = time.monotonic()
-
         deal_id = deal_context.get("deal_id", "")
+
+        if settings.AI_PROVIDER == "groq" and settings.GROQ_API_KEY:
+            try:
+                return await self._evaluate_with_groq(rule, deal_context, documents, start)
+            except Exception as e:
+                logger.error(f"Groq evaluation failed, falling back to mock: {e}")
+                # Fallback to mock
 
         # Artificial delay to make streaming feel realistic
         delay_ms = random.randint(200, 1500)
@@ -420,6 +430,52 @@ class AIService:
             confidence=result.confidence,
             evidence=result.evidence,
             reasoning=result.reasoning,
+            runtime_ms=elapsed_ms,
+        )
+
+    async def _evaluate_with_groq(self, rule: Rule, deal_context: dict, documents: list, start: float) -> RuleEvaluation:
+        client = AsyncGroq(api_key=settings.GROQ_API_KEY)
+        
+        system_prompt = (
+            "You are an AI assistant performing document validation for an Accounts Receivable Copilot.\n"
+            "Evaluate the provided deal context and documents against the specific rule.\n"
+            "Return a JSON object containing exactly these fields:\n"
+            "- status: 'pass', 'warning', or 'fail'\n"
+            "- confidence: A float between 0.0 and 1.0\n"
+            "- evidence: 1-2 sentences quoting or summarizing the specific evidence found.\n"
+            "- reasoning: 2-4 sentences explaining why the status was assigned based on the rule.\n"
+            "Format the output strictly as a JSON object."
+        )
+        
+        doc_summaries = [f"Doc {d.get('id', 'unknown')}: {d.get('filename', 'unknown')}" for d in documents]
+        
+        user_prompt = (
+            f"Rule to Evaluate:\n{rule.prompt}\n\n"
+            f"Required Context Keys: {rule.required_context}\n\n"
+            f"Deal Context:\n{json.dumps(deal_context, indent=2)}\n\n"
+            f"Provided Documents:\n{chr(10).join(doc_summaries)}\n\n"
+            "Please provide your JSON evaluation."
+        )
+        
+        response = await client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.1,
+            response_format={"type": "json_object"},
+        )
+        
+        content = response.choices[0].message.content
+        parsed = json.loads(content)
+        
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        return RuleEvaluation(
+            status=parsed.get("status", "pass"),
+            confidence=float(parsed.get("confidence", 0.9)),
+            evidence=parsed.get("evidence", "Evidence not provided."),
+            reasoning=parsed.get("reasoning", "Reasoning not provided."),
             runtime_ms=elapsed_ms,
         )
 
