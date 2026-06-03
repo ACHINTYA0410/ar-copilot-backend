@@ -1,3 +1,7 @@
+from app.rules.po_validation import (
+    CheckLinkedDealExistsRule, CheckAcademicYearCurrentRule, CheckAuthorizedCreatorRule,
+    CheckFinanceApprovalAgingRule, CheckCustomerVerificationLinkRule, CheckNotificationRoutingRule,
+)
 from app.rules.document_content import (
     CheckSignaturesRule, CheckPanAttachedRule, CheckEffectiveDateRule,
     CheckStampDutyRule, CheckWitnessSignaturesRule, CheckCompanyLetterheadRule,
@@ -26,6 +30,9 @@ ALL_RULES = [
     CheckZoneApprovalRule(), CheckOnboardingDateRule(), CheckPaymentTermsRule(),
     CheckDeviationApprovalRule(), CheckCreditLimitRule(), CheckBlacklistRule(),
     CheckRegulatoryComplianceRule(), CheckTerritoryConflictRule(), CheckSlaTermsRule(),
+    # PO validation rules
+    CheckLinkedDealExistsRule(), CheckAcademicYearCurrentRule(), CheckAuthorizedCreatorRule(),
+    CheckFinanceApprovalAgingRule(), CheckCustomerVerificationLinkRule(), CheckNotificationRoutingRule(),
 ]
 
 RULE_REGISTRY = {rule.rule_id: rule for rule in ALL_RULES}

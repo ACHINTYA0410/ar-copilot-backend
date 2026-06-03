@@ -1,6 +1,7 @@
 import enum
 import uuid
 from datetime import datetime
+from typing import Optional
 
 from sqlalchemy import DateTime, Enum, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -34,8 +35,13 @@ class ValidationRun(Base):
     __tablename__ = "validation_runs"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    deal_id: Mapped[str] = mapped_column(String(20), ForeignKey("deals.id"), nullable=False)
-    checklist_id: Mapped[str] = mapped_column(String(36), ForeignKey("checklists.id"), nullable=True)
+    # deal_id kept for FK linkage on deal runs; nullable so PO runs don't require it
+    deal_id: Mapped[Optional[str]] = mapped_column(String(20), ForeignKey("deals.id"), nullable=True)
+    checklist_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("checklists.id"), nullable=True)
+
+    # target_type distinguishes deal runs from po runs; target_id is the canonical subject ID
+    target_type: Mapped[Optional[str]] = mapped_column(String(10), nullable=True, server_default="deal")
+    target_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
 
     status: Mapped[ValidationRunStatus] = mapped_column(
         Enum(ValidationRunStatus), default=ValidationRunStatus.pending
@@ -49,7 +55,7 @@ class ValidationRun(Base):
     completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    deal: Mapped["Deal"] = relationship("Deal", back_populates="validation_runs")  # noqa: F821
+    deal: Mapped[Optional["Deal"]] = relationship("Deal", back_populates="validation_runs")  # noqa: F821
     rule_results: Mapped[list["RuleResult"]] = relationship(
         "RuleResult", back_populates="validation_run", cascade="all, delete-orphan"
     )
