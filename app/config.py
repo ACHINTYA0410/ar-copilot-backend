@@ -18,5 +18,8 @@ class Settings(BaseSettings):
     AI_PROVIDER: str = "mock"
     GROQ_API_KEY: str | None = None
 
+    # ORP data source — swap to "mysql" or "api" when real ORP access arrives
+    ORP_PROVIDER: str = "local_sqlite"
+
 
 settings = Settings()

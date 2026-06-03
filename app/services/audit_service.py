@@ -99,6 +99,40 @@ class AuditService:
             after_value={"status": new_status},
         )
 
+    async def log_po_validation_start(self, order_id: str, run_id: str) -> AuditLog:
+        return await self.log(
+            actor_type=ActorType.ai_agent,
+            actor_name="Validation Engine",
+            action_type=ActionType.auto_approved,
+            target_type=TargetType.deal,
+            target_id=order_id,
+            description=f"PO validation run {run_id} started for order {order_id}",
+            metadata={"run_id": run_id, "target_type": "po"},
+        )
+
+    async def log_po_validation_complete(
+        self, order_id: str, run_id: str, passed: int, warnings: int, failed: int
+    ) -> AuditLog:
+        if failed > 0:
+            action = ActionType.auto_rejected
+            desc = f"PO validation completed for {order_id}: {passed} pass, {warnings} warning, {failed} fail"
+        elif warnings > 0:
+            action = ActionType.pattern_detected
+            desc = f"PO validation completed for {order_id}: {passed} pass, {warnings} warning — flagged for review"
+        else:
+            action = ActionType.auto_approved
+            desc = f"PO validation completed for {order_id}: {passed} pass — auto-approved"
+
+        return await self.log(
+            actor_type=ActorType.ai_agent,
+            actor_name="Validation Engine",
+            action_type=action,
+            target_type=TargetType.deal,
+            target_id=order_id,
+            description=desc,
+            metadata={"run_id": run_id, "passed": passed, "warnings": warnings, "failed": failed, "target_type": "po"},
+        )
+
     async def log_rule_change(
         self, actor_name: str, rule_id: str, before: dict, after: dict
     ) -> AuditLog:

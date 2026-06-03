@@ -401,7 +401,88 @@ _DEAL_OVERRIDES: dict[str, dict[str, RuleEvaluation]] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Hardcoded PO validation responses for demo PO 49526 (SRI AMMA DISCOVERY EM SCHOOL)
+# Distribution: 4 pass, 1 warning, 1 fail (notification_routing warns; no fail here —
+# the deterministic rules handle the actual fail for demo variety)
+# ---------------------------------------------------------------------------
+_PO_49526_RESPONSES: dict[str, RuleEvaluation] = {
+    "po_rule_notification_routing": RuleEvaluation(
+        status="pass",
+        confidence=0.85,
+        evidence=(
+            "notification_sent_to=school matches the expected direct-school distribution model "
+            "for a forward PO of this type. No distributor intermediary is recorded on this deal."
+        ),
+        reasoning=(
+            "Based on the PO type (forward) and deal context, routing to the school directly is correct. "
+            "Distributor routing would only apply for forward_counter deals. Confidence 0.85 pending "
+            "formal distribution_model field on the deals table."
+        ),
+        runtime_ms=0,
+    ),
+}
+
+# Generic PO rule responses used for any order_id that isn't specifically overridden
+_PO_GENERIC_RESPONSES: dict[str, RuleEvaluation] = {
+    "po_rule_notification_routing": RuleEvaluation(
+        status="pass",
+        confidence=0.85,
+        evidence="Notification routing appears consistent with the deal's distribution model.",
+        reasoning=(
+            "The notification_sent_to value is consistent with similar deals of this type. "
+            "Confidence is 0.85 because the deals.distribution_model field is not yet available "
+            "for a deterministic check."
+        ),
+        runtime_ms=0,
+    ),
+}
+
+
 class AIService:
+    async def evaluate_po_rule(
+        self,
+        rule: "Rule",
+        po_context: dict,
+    ) -> RuleEvaluation:
+        """Mock evaluation path for PO rules that delegate to the AI service."""
+        start = time.monotonic()
+        order_id = po_context.get("order_id", "")
+
+        delay_ms = random.randint(200, 900)
+        await asyncio.sleep(delay_ms / 1000)
+
+        result = self._lookup_po_response(rule.id, order_id)
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        return RuleEvaluation(
+            status=result.status,
+            confidence=result.confidence,
+            evidence=result.evidence,
+            reasoning=result.reasoning,
+            runtime_ms=elapsed_ms,
+        )
+
+    def _lookup_po_response(self, rule_id: str, order_id: str) -> RuleEvaluation:
+        if order_id == "49526" and rule_id in _PO_49526_RESPONSES:
+            return _PO_49526_RESPONSES[rule_id]
+        if rule_id in _PO_GENERIC_RESPONSES:
+            base = _PO_GENERIC_RESPONSES[rule_id]
+            jitter = random.uniform(-0.05, 0.05)
+            return RuleEvaluation(
+                status=base.status,
+                confidence=min(0.99, max(0.60, base.confidence + jitter)),
+                evidence=base.evidence,
+                reasoning=base.reasoning,
+                runtime_ms=base.runtime_ms,
+            )
+        return RuleEvaluation(
+            status="pass",
+            confidence=round(random.uniform(0.75, 0.92), 2),
+            evidence="PO rule check completed. No issues detected.",
+            reasoning="Automated check passed with no anomalies.",
+            runtime_ms=0,
+        )
+
     async def evaluate_rule(
         self,
         rule: Rule,

@@ -11,6 +11,7 @@ from app.rules import RULE_REGISTRY
 from app.rules.base import RuleContext
 from app.services.ai_service import AIService
 from app.services.audit_service import AuditService
+from app.services.orp_provider import LocalSQLiteORPProvider
 
 
 class ValidationEngine:
@@ -118,6 +119,98 @@ class ValidationEngine:
             deal.status = DealStatus.needs_review
 
         await self.audit_service.log_validation_complete(deal_id, run.id, passed, warnings, failed)
+        await self.db.commit()
+
+    async def run_po_checklist(
+        self,
+        order_id: str,
+        checklist_id: str,
+    ) -> AsyncIterator[RuleResult]:
+        provider = LocalSQLiteORPProvider(self.db)
+        po_data = await provider.get_po(order_id)
+        if not po_data:
+            raise ValueError(f"PO {order_id} not found")
+
+        checklist = await self.db.get(Checklist, checklist_id)
+        rule_ids = checklist.rule_ids if checklist else []
+
+        # Pre-resolve linked deal so check_linked_deal_exists is sessionless
+        from app.models.deal import Deal
+        linked_deal = await self.db.get(Deal, po_data["deal_id"])
+        po_data["_linked_deal_found"] = linked_deal is not None
+
+        run = ValidationRun(
+            deal_id=None,
+            target_type="po",
+            target_id=order_id,
+            checklist_id=checklist_id,
+            status=ValidationRunStatus.running,
+            total_rules=len(rule_ids),
+            started_at=datetime.now(timezone.utc),
+        )
+        self.db.add(run)
+        await self.db.flush()
+
+        await self.audit_service.log_po_validation_start(order_id, run.id)
+        await self.db.commit()
+
+        context = RuleContext(
+            deal_id=order_id,
+            deal_data=po_data,
+            documents=[],
+        )
+
+        passed = warnings = failed = 0
+
+        for rule_id in rule_ids:
+            rule_instance = RULE_REGISTRY.get(rule_id)
+            if not rule_instance:
+                continue
+
+            result_row = RuleResult(
+                validation_run_id=run.id,
+                rule_id=rule_instance.rule_id,
+                rule_name=rule_instance.name,
+                section=rule_instance.section,
+                status=RuleResultStatus.running,
+                executed_at=datetime.now(timezone.utc),
+            )
+            self.db.add(result_row)
+            await self.db.flush()
+
+            evaluation = await rule_instance.evaluate(context, self.ai_service)
+
+            status_map = {
+                "pass": RuleResultStatus.pass_,
+                "warning": RuleResultStatus.warning,
+                "fail": RuleResultStatus.fail,
+            }
+            result_row.status = status_map.get(evaluation.status, RuleResultStatus.pass_)
+            result_row.confidence = evaluation.confidence
+            result_row.evidence = evaluation.evidence
+            result_row.ai_reasoning = evaluation.reasoning
+            result_row.action_taken = ActionTaken.none
+            result_row.executed_at = datetime.now(timezone.utc)
+
+            if evaluation.status == "pass":
+                passed += 1
+            elif evaluation.status == "warning":
+                warnings += 1
+            else:
+                failed += 1
+
+            await self.db.flush()
+            await self.db.commit()
+
+            yield result_row
+
+        run.status = ValidationRunStatus.completed
+        run.passed = passed
+        run.warnings = warnings
+        run.failed = failed
+        run.completed_at = datetime.now(timezone.utc)
+
+        await self.audit_service.log_po_validation_complete(order_id, run.id, passed, warnings, failed)
         await self.db.commit()
 
     async def get_or_create_default_checklist_id(self) -> str:

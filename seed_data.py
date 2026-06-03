@@ -14,6 +14,7 @@ from app.models.audit import ActionType, ActorType, AuditLog, TargetType
 from app.models.checklist import Checklist, ChecklistStatus
 from app.models.deal import Deal, DealStatus
 from app.models.document import Document, DocumentStatus, DocumentType
+from app.models.purchase_order import NotificationTarget, OrderStatus, OrderType, POLinkStatus, POMode, PurchaseOrder
 from app.models.rule import ActionOnFail, Rule
 from app.models.validation import ActionTaken, RuleResult, RuleResultStatus, ValidationRun, ValidationRunStatus
 
@@ -96,6 +97,25 @@ RULES_DATA = [
     ("rule_check_payment_terms", "Payment Terms Standard", "Field Completeness",
      "Verify payment terms are standard (Annual upfront, Net-30).", ["documents"], 0.85, ActionOnFail.flag_review,
      "Non-standard payment terms detected requiring additional approval."),
+    # PO Validation
+    ("po_rule_linked_deal_exists", "PO is linked to an existing deal", "Deal Linkage",
+     "Verify the PO's deal_id references an existing deal in the AR Co-Pilot system.", ["po_data"], 1.0, ActionOnFail.auto_reject,
+     "The PO references a deal ID that does not exist — orphan PO."),
+    ("po_rule_academic_year_current", "PO academic year matches current cycle", "Deal Linkage",
+     "Verify the PO's order_academic_year matches the current active cycle (26-27).", ["po_data"], 1.0, ActionOnFail.auto_reject,
+     "PO academic year is not the current cycle (26-27)."),
+    ("po_rule_authorized_creator", "PO created by authorized LEAD user", "Authorization",
+     "Verify the PO was created by a @leadschool.in email address.", ["po_data"], 1.0, ActionOnFail.auto_reject,
+     "PO creator is not a verified LEAD domain user."),
+    ("po_rule_finance_approval_aging", "PO is not stuck awaiting Finance approval", "Workflow Health",
+     "If the PO is in FIN_HOLD and has been waiting more than 30 minutes, flag it.", ["po_data"], 0.7, ActionOnFail.flag_review,
+     "PO has been in FIN_HOLD beyond the acceptable threshold — chase Finance."),
+    ("po_rule_customer_verification", "Customer verification link is healthy", "Customer Approval Flow",
+     "Verify the customer verification link has been sent and is in a healthy state.", ["po_data"], 0.7, ActionOnFail.flag_review,
+     "Customer verification link is missing, inactive, or stalled."),
+    ("po_rule_notification_routing", "Notification target matches deal distribution model", "Customer Approval Flow",
+     "Verify notification_sent_to (school/distributor) matches the expected distribution model for this deal.", ["po_data"], 0.7, ActionOnFail.flag_review,
+     "Notification routing may not match the deal's distribution model."),
     # Policy
     ("rule_check_deviation_approval", "Deviation % Drives ZCEO/Arvind Approval", "Policy",
      "Check if discount >10% has ZCEO approval.", ["deal.amount", "hubspot.list_price", "documents"], 0.88, ActionOnFail.auto_reject,
@@ -503,11 +523,35 @@ async def seed(db: AsyncSession) -> None:
     print(f"  {len(RULES_DATA)} rules seeded")
 
     print("Seeding checklists...")
+    PO_RULE_IDS = [
+        "po_rule_linked_deal_exists",
+        "po_rule_academic_year_current",
+        "po_rule_authorized_creator",
+        "po_rule_finance_approval_aging",
+        "po_rule_customer_verification",
+        "po_rule_notification_routing",
+    ]
+    # Deal-validation checklists use random UUIDs; PO checklist uses a fixed ID
+    # so the validate endpoint can resolve it by name without a DB lookup.
+    po_checklist = await db.get(Checklist, "checklist_po_validation_v1")
+    if not po_checklist:
+        po_checklist = Checklist(
+            id="checklist_po_validation_v1",
+            name="PO Validation Checklist",
+            version="v1.0",
+            status=ChecklistStatus.active,
+            rule_ids=PO_RULE_IDS,
+            published_at=days_ago(1),
+        )
+        db.add(po_checklist)
+    await db.flush()
+
+    deal_rule_ids = [r[0] for r in RULES_DATA if not r[0].startswith("po_rule_")]
     checklists_data = [
-        ("Onboarding Validation", "v3.2", ChecklistStatus.active, ALL_RULE_IDS, days_ago(30)),
-        ("Order Approval", "v2.1", ChecklistStatus.active, ALL_RULE_IDS[:18], days_ago(60)),
-        ("Renewal Validation", "v1.0", ChecklistStatus.draft, ALL_RULE_IDS[:12], None),
-        ("KYC Verification", "v2.4", ChecklistStatus.active, ALL_RULE_IDS[8:18], days_ago(45)),
+        ("Onboarding Validation", "v3.2", ChecklistStatus.active, deal_rule_ids, days_ago(30)),
+        ("Order Approval", "v2.1", ChecklistStatus.active, deal_rule_ids[:18], days_ago(60)),
+        ("Renewal Validation", "v1.0", ChecklistStatus.draft, deal_rule_ids[:12], None),
+        ("KYC Verification", "v2.4", ChecklistStatus.active, deal_rule_ids[8:18], days_ago(45)),
     ]
     checklist_ids = []
     for name, version, status, rule_ids, published_at in checklists_data:
@@ -523,7 +567,7 @@ async def seed(db: AsyncSession) -> None:
         checklist_ids.append(cl.id)
     await db.flush()
     primary_checklist_id = checklist_ids[0]
-    print(f"  4 checklists seeded (primary: {primary_checklist_id})")
+    print(f"  5 checklists seeded (primary deal: {primary_checklist_id}, PO: checklist_po_validation_v1)")
 
     print("Seeding deals...")
     for d in DEALS_DATA:
@@ -648,11 +692,433 @@ async def seed(db: AsyncSession) -> None:
     await db.flush()
     print(f"  {len(audit_entries)} audit entries seeded")
 
+    print("Seeding purchase orders (ORP sample data)...")
+    # Wipe stale POs so re-seeding always produces a clean state
+    from sqlalchemy import delete as sa_delete
+    await db.execute(sa_delete(PurchaseOrder))
+    await db.flush()
+
+    sample_pos = [
+        # ------------------------------------------------------------------ #
+        # FIN_APPROVED (8) — finance signed off; some also customer-approved  #
+        # ------------------------------------------------------------------ #
+        PurchaseOrder(
+            order_id="49526",
+            deal_id="44452435111",
+            customer_name="SRI AMMA DISCOVERY EM SCHOOL",
+            agreement_type="PF",
+            order_academic_year="26-27",
+            order_type=OrderType.forward_counter_hardware,
+            created_by="uttam.dey@leadschool.in",
+            created_at=datetime(2026, 5, 26, 9, 22),
+            po_mode=POMode.online,
+            notification_sent_to=NotificationTarget.school,
+            current_order_status=OrderStatus.FIN_APPROVED,
+            finance_approval_by="hasan.khan@leadschool.in",
+            finance_approval_at=datetime(2026, 5, 26, 11, 5),
+            approval_aging_minutes=None,
+            whatsapp_delivery_status="delivered",
+            reminder_count=0,
+            po_approved_by="principal.sriamma@gmail.com",
+            po_approver_contact_no="9876543210",
+            po_approved_on=datetime(2026, 5, 26, 14, 30),
+            po_verification_link="https://oc.leadschool.in/poverification?accessCode=A1B2C3",
+            po_link_status=POLinkStatus.APPROVED,
+        ),
+        PurchaseOrder(
+            order_id="49510",
+            deal_id="45946557006",
+            customer_name="ROSE MARY SCHOOL OF EXCELLENCE",
+            agreement_type="PF",
+            order_academic_year="26-27",
+            order_type=OrderType.sampling,
+            created_by="siraj.pathan@leadschool.in",
+            created_at=datetime(2026, 5, 25, 20, 13),
+            po_mode=POMode.online,
+            notification_sent_to=NotificationTarget.school,
+            current_order_status=OrderStatus.FIN_APPROVED,
+            finance_approval_by="vishal.udhani@leadschool.in",
+            finance_approval_at=datetime(2026, 5, 25, 22, 45),
+            whatsapp_delivery_status="delivered",
+            reminder_count=1,
+            po_approved_by="director.rosemary@yahoo.com",
+            po_approver_contact_no="9845001234",
+            po_approved_on=datetime(2026, 5, 26, 9, 10),
+            po_verification_link="https://oc.leadschool.in/poverification?accessCode=D4E5F6",
+            po_link_status=POLinkStatus.APPROVED,
+        ),
+        PurchaseOrder(
+            order_id="49507",
+            deal_id="43170799207",
+            customer_name="ROYAL PUBLIC SCHOOL NAWAGARH",
+            agreement_type="PF",
+            order_academic_year="26-27",
+            order_type=OrderType.forward_counter_books,
+            created_by="indranil.bhattacharjee@leadschool.in",
+            created_at=datetime(2026, 5, 25, 19, 58),
+            po_mode=POMode.online,
+            notification_sent_to=NotificationTarget.distributor,
+            current_order_status=OrderStatus.FIN_APPROVED,
+            finance_approval_by="sameera.boyinapalli@leadschool.in",
+            finance_approval_at=datetime(2026, 5, 25, 21, 30),
+            whatsapp_delivery_status="delivered",
+            reminder_count=0,
+            po_approved_by="royalpublicschool.nwg@gmail.com",
+            po_approver_contact_no="9712334567",
+            po_approved_on=datetime(2026, 5, 26, 8, 0),
+            po_verification_link="https://oc.leadschool.in/poverification?accessCode=G7H8I9",
+            po_link_status=POLinkStatus.APPROVED,
+        ),
+        PurchaseOrder(
+            order_id="49498",
+            deal_id="59086467175",
+            customer_name="Christhuraja Matric. Hr. Sec School",
+            agreement_type="PF",
+            order_academic_year="26-27",
+            order_type=OrderType.forward,
+            created_by="sunita.kumari@leadschool.in",
+            created_at=datetime(2026, 5, 25, 14, 45),
+            po_mode=POMode.online,
+            notification_sent_to=NotificationTarget.school,
+            current_order_status=OrderStatus.FIN_APPROVED,
+            finance_approval_by="hasan.khan@leadschool.in",
+            finance_approval_at=datetime(2026, 5, 25, 17, 0),
+            whatsapp_delivery_status="delivered",
+            reminder_count=2,
+            po_approved_by="christhuraja.admin@gmail.com",
+            po_approver_contact_no="9500012345",
+            po_approved_on=datetime(2026, 5, 26, 10, 15),
+            po_verification_link="https://oc.leadschool.in/poverification?accessCode=J1K2L3",
+            po_link_status=POLinkStatus.APPROVED,
+        ),
+        PurchaseOrder(
+            order_id="49485",
+            deal_id="61234890123",
+            customer_name="AET MATRICULATION HR SEC SCHOOL",
+            agreement_type="PF",
+            order_academic_year="26-27",
+            order_type=OrderType.forward_counter_hardware,
+            created_by="rajesh.verma@leadschool.in",
+            created_at=datetime(2026, 5, 24, 11, 30),
+            po_mode=POMode.offline,
+            notification_sent_to=NotificationTarget.school,
+            current_order_status=OrderStatus.FIN_APPROVED,
+            finance_approval_by="vishal.udhani@leadschool.in",
+            finance_approval_at=datetime(2026, 5, 24, 14, 0),
+            whatsapp_delivery_status="delivered",
+            reminder_count=0,
+            po_approved_by="aet.principal@leadschool.in",
+            po_approver_contact_no="9381112233",
+            po_approved_on=datetime(2026, 5, 24, 16, 45),
+            po_verification_link="https://oc.leadschool.in/poverification?accessCode=M4N5O6",
+            po_link_status=POLinkStatus.APPROVED,
+        ),
+        PurchaseOrder(
+            order_id="49471",
+            deal_id="57823401298",
+            customer_name="Yoganathan Selvam- School Sucess Sampling Deal",
+            agreement_type="PF",
+            order_academic_year="26-27",
+            order_type=OrderType.sampling,
+            created_by="kavita.sharma@leadschool.in",
+            created_at=datetime(2026, 5, 24, 9, 15),
+            po_mode=POMode.online,
+            notification_sent_to=NotificationTarget.distributor,
+            current_order_status=OrderStatus.FIN_APPROVED,
+            finance_approval_by="sameera.boyinapalli@leadschool.in",
+            finance_approval_at=datetime(2026, 5, 24, 11, 50),
+            whatsapp_delivery_status="delivered",
+            reminder_count=1,
+            po_approved_by="yoganathan.selvam@gmail.com",
+            po_approver_contact_no="9944556677",
+            po_approved_on=datetime(2026, 5, 24, 15, 20),
+            po_verification_link="https://oc.leadschool.in/poverification?accessCode=P7Q8R9",
+            po_link_status=POLinkStatus.APPROVED,
+        ),
+        PurchaseOrder(
+            order_id="49460",
+            deal_id="48901234567",
+            customer_name="Gaurav Dubey- School Sucess Sampling Deal",
+            agreement_type="PF",
+            order_academic_year="26-27",
+            order_type=OrderType.sampling,
+            created_by="pradeep.nair@leadschool.in",
+            created_at=datetime(2026, 5, 23, 16, 50),
+            po_mode=POMode.online,
+            notification_sent_to=NotificationTarget.school,
+            current_order_status=OrderStatus.FIN_APPROVED,
+            finance_approval_by="hasan.khan@leadschool.in",
+            finance_approval_at=datetime(2026, 5, 23, 18, 30),
+            whatsapp_delivery_status="delivered",
+            reminder_count=0,
+            po_approved_by="gaurav.dubey@gmail.com",
+            po_approver_contact_no="9811223344",
+            po_approved_on=datetime(2026, 5, 23, 20, 5),
+            po_verification_link="https://oc.leadschool.in/poverification?accessCode=S1T2U3",
+            po_link_status=POLinkStatus.APPROVED,
+        ),
+        PurchaseOrder(
+            order_id="49445",
+            deal_id="52109876543",
+            customer_name="Ronak Jain- Learning System Sampling Deal",
+            agreement_type="PF",
+            order_academic_year="26-27",
+            order_type=OrderType.forward_counter_books,
+            created_by="anita.joshi@leadschool.in",
+            created_at=datetime(2026, 5, 23, 10, 5),
+            po_mode=POMode.offline,
+            notification_sent_to=NotificationTarget.school,
+            current_order_status=OrderStatus.FIN_APPROVED,
+            finance_approval_by="vishal.udhani@leadschool.in",
+            finance_approval_at=datetime(2026, 5, 23, 12, 40),
+            whatsapp_delivery_status="delivered",
+            reminder_count=0,
+            po_approved_by="ronak.jain99@yahoo.com",
+            po_approver_contact_no="9920112233",
+            po_approved_on=datetime(2026, 5, 23, 14, 55),
+            po_verification_link="https://oc.leadschool.in/poverification?accessCode=V4W5X6",
+            po_link_status=POLinkStatus.APPROVED,
+        ),
+
+        # ------------------------------------------------------------------ #
+        # FIN_HOLD (3) — waiting on finance; aging tracked                    #
+        # ------------------------------------------------------------------ #
+        PurchaseOrder(
+            order_id="49432",
+            deal_id="63458901234",
+            customer_name="Ashish Jakhar- Learning System Sampling Deal",
+            agreement_type="PF",
+            order_academic_year="26-27",
+            order_type=OrderType.sampling,
+            created_by="uttam.dey@leadschool.in",
+            created_at=datetime(2026, 5, 22, 17, 20),
+            po_mode=POMode.online,
+            notification_sent_to=NotificationTarget.school,
+            current_order_status=OrderStatus.FIN_HOLD,
+            approval_aging_minutes=3,
+            whatsapp_delivery_status="pending",
+            reminder_count=0,
+        ),
+        PurchaseOrder(
+            order_id="49418",
+            deal_id="46789012345",
+            customer_name="SRI AMMA DISCOVERY EM SCHOOL",
+            agreement_type="PF",
+            order_academic_year="26-27",
+            order_type=OrderType.forward_counter_hardware,
+            created_by="meera.pillai@leadschool.in",
+            created_at=datetime(2026, 5, 22, 8, 40),
+            po_mode=POMode.online,
+            notification_sent_to=NotificationTarget.distributor,
+            current_order_status=OrderStatus.FIN_HOLD,
+            approval_aging_minutes=8,
+            whatsapp_delivery_status="pending",
+            reminder_count=1,
+        ),
+        PurchaseOrder(
+            order_id="49405",
+            deal_id="55670123456",
+            customer_name="ROSE MARY SCHOOL OF EXCELLENCE",
+            agreement_type="PF",
+            order_academic_year="26-27",
+            order_type=OrderType.forward,
+            created_by="suresh.patel@leadschool.in",
+            created_at=datetime(2026, 5, 21, 13, 10),
+            po_mode=POMode.online,
+            notification_sent_to=NotificationTarget.school,
+            current_order_status=OrderStatus.FIN_HOLD,
+            approval_aging_minutes=25,
+            whatsapp_delivery_status="failed",
+            reminder_count=3,
+        ),
+
+        # ------------------------------------------------------------------ #
+        # PO_APPROVAL_PENDING (3) — finance done, awaiting customer action    #
+        # ------------------------------------------------------------------ #
+        PurchaseOrder(
+            order_id="49390",
+            deal_id="67890123456",
+            customer_name="ROYAL PUBLIC SCHOOL NAWAGARH",
+            agreement_type="PF",
+            order_academic_year="26-27",
+            order_type=OrderType.forward,
+            created_by="indranil.bhattacharjee@leadschool.in",
+            created_at=datetime(2026, 5, 21, 9, 0),
+            po_mode=POMode.online,
+            notification_sent_to=NotificationTarget.school,
+            current_order_status=OrderStatus.PO_APPROVAL_PENDING,
+            finance_approval_by="sameera.boyinapalli@leadschool.in",
+            finance_approval_at=datetime(2026, 5, 21, 11, 30),
+            whatsapp_delivery_status="delivered",
+            reminder_count=1,
+            po_verification_link="https://oc.leadschool.in/poverification?accessCode=Y7Z8A9",
+            po_link_status=POLinkStatus.ACTIVE,
+        ),
+        PurchaseOrder(
+            order_id="49375",
+            deal_id="71234567890",
+            customer_name="Christhuraja Matric. Hr. Sec School",
+            agreement_type="PF",
+            order_academic_year="26-27",
+            order_type=OrderType.sampling,
+            created_by="kavita.sharma@leadschool.in",
+            created_at=datetime(2026, 5, 20, 15, 30),
+            po_mode=POMode.online,
+            notification_sent_to=NotificationTarget.school,
+            current_order_status=OrderStatus.PO_APPROVAL_PENDING,
+            finance_approval_by="hasan.khan@leadschool.in",
+            finance_approval_at=datetime(2026, 5, 20, 17, 45),
+            whatsapp_delivery_status="delivered",
+            reminder_count=2,
+            po_verification_link="https://oc.leadschool.in/poverification?accessCode=B2C3D4",
+            po_link_status=POLinkStatus.ACTIVE,
+        ),
+        PurchaseOrder(
+            order_id="49360",
+            deal_id="74567890123",
+            customer_name="AET MATRICULATION HR SEC SCHOOL",
+            agreement_type="PF",
+            order_academic_year="26-27",
+            order_type=OrderType.forward_counter_books,
+            created_by="rajesh.verma@leadschool.in",
+            created_at=datetime(2026, 5, 20, 10, 15),
+            po_mode=POMode.offline,
+            notification_sent_to=NotificationTarget.distributor,
+            current_order_status=OrderStatus.PO_APPROVAL_PENDING,
+            finance_approval_by="vishal.udhani@leadschool.in",
+            finance_approval_at=datetime(2026, 5, 20, 13, 0),
+            whatsapp_delivery_status="delivered",
+            reminder_count=0,
+            po_verification_link="https://oc.leadschool.in/poverification?accessCode=E5F6G7",
+            po_link_status=POLinkStatus.ACTIVE,
+        ),
+
+        # ------------------------------------------------------------------ #
+        # DRAFT (2) — just created, no approvals yet                         #
+        # ------------------------------------------------------------------ #
+        PurchaseOrder(
+            order_id="49345",
+            deal_id="78901234567",
+            customer_name="Yoganathan Selvam- School Sucess Sampling Deal",
+            agreement_type="PF",
+            order_academic_year="26-27",
+            order_type=OrderType.sampling,
+            created_by="sunita.kumari@leadschool.in",
+            created_at=datetime(2026, 5, 27, 8, 5),
+            po_mode=POMode.online,
+            notification_sent_to=NotificationTarget.school,
+            current_order_status=OrderStatus.DRAFT,
+            whatsapp_delivery_status=None,
+            reminder_count=0,
+        ),
+        PurchaseOrder(
+            order_id="49330",
+            deal_id="82345678901",
+            customer_name="Gaurav Dubey- School Sucess Sampling Deal",
+            agreement_type="PF",
+            order_academic_year="26-27",
+            order_type=OrderType.forward,
+            created_by="pradeep.nair@leadschool.in",
+            created_at=datetime(2026, 5, 27, 7, 40),
+            po_mode=POMode.online,
+            notification_sent_to=NotificationTarget.school,
+            current_order_status=OrderStatus.DRAFT,
+            whatsapp_delivery_status=None,
+            reminder_count=0,
+        ),
+
+        # ------------------------------------------------------------------ #
+        # DISCARDED (1)                                                       #
+        # ------------------------------------------------------------------ #
+        PurchaseOrder(
+            order_id="49310",
+            deal_id="85678901234",
+            customer_name="Ronak Jain- Learning System Sampling Deal",
+            agreement_type="PF",
+            order_academic_year="26-27",
+            order_type=OrderType.forward_counter_hardware,
+            created_by="anita.joshi@leadschool.in",
+            created_at=datetime(2026, 5, 19, 14, 0),
+            po_mode=POMode.online,
+            notification_sent_to=NotificationTarget.school,
+            current_order_status=OrderStatus.DISCARDED,
+            finance_approval_by=None,
+            whatsapp_delivery_status="failed",
+            reminder_count=4,
+            po_rejected_at=datetime(2026, 5, 20, 9, 30),
+            po_rejection_reason="Duplicate PO — school already approved under order 49310 for same deal.",
+        ),
+
+        # ------------------------------------------------------------------ #
+        # Edge cases (3) — for validation rule failure demos                 #
+        # ------------------------------------------------------------------ #
+
+        # Edge case 1: deal_id has no corresponding deal — "linked deal exists" rule
+        PurchaseOrder(
+            order_id="49999",
+            deal_id="99999999999",
+            customer_name="Ashish Jakhar- Learning System Sampling Deal",
+            agreement_type="PF",
+            order_academic_year="26-27",
+            order_type=OrderType.forward,
+            created_by="test.orphan@leadschool.in",
+            created_at=datetime(2026, 5, 24, 10, 0),
+            po_mode=POMode.online,
+            notification_sent_to=NotificationTarget.school,
+            current_order_status=OrderStatus.FIN_HOLD,
+            approval_aging_minutes=120,
+            whatsapp_delivery_status="pending",
+            reminder_count=0,
+        ),
+
+        # Edge case 2: stale academic year — "current academic year" rule
+        PurchaseOrder(
+            order_id="49888",
+            deal_id="44452435111",
+            customer_name="SRI AMMA DISCOVERY EM SCHOOL",
+            agreement_type="PF",
+            order_academic_year="24-25",
+            order_type=OrderType.forward,
+            created_by="uttam.dey@leadschool.in",
+            created_at=datetime(2026, 5, 23, 11, 0),
+            po_mode=POMode.online,
+            notification_sent_to=NotificationTarget.school,
+            current_order_status=OrderStatus.FIN_HOLD,
+            approval_aging_minutes=60,
+            whatsapp_delivery_status="pending",
+            reminder_count=1,
+        ),
+
+        # Edge case 3: external email as created_by — "authorized user" rule
+        PurchaseOrder(
+            order_id="49777",
+            deal_id="59086467175",
+            customer_name="ROSE MARY SCHOOL OF EXCELLENCE",
+            agreement_type="PF",
+            order_academic_year="26-27",
+            order_type=OrderType.forward,
+            created_by="random.person@gmail.com",
+            created_at=datetime(2026, 5, 22, 14, 0),
+            po_mode=POMode.online,
+            notification_sent_to=NotificationTarget.school,
+            current_order_status=OrderStatus.DRAFT,
+            whatsapp_delivery_status=None,
+            reminder_count=0,
+        ),
+    ]
+
+    for po in sample_pos:
+        db.add(po)
+    await db.flush()
+    n_edge = 3
+    print(f"  {len(sample_pos)} purchase orders seeded ({len(sample_pos) - n_edge} live POs, {n_edge} edge cases)")
+
     await db.commit()
     print("\nSeed complete!")
     print(f"  Deals: {len(DEALS_DATA)}")
-    print(f"  Rules: {len(RULES_DATA)}")
-    print(f"  Checklists: 4")
+    print(f"  Rules: {len(RULES_DATA)} ({len([r for r in RULES_DATA if r[0].startswith('po_rule_')])} PO rules)")
+    print("  Checklists: 5 (4 deal + 1 PO validation)")
+    print(f"  Purchase orders: {len(sample_pos)}")
     print(f"  Audit entries: {len(audit_entries)}")
     print("  DL-12345 validation run: 18 pass / 5 warning / 3 fail OK")
 

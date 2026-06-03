@@ -24,7 +24,9 @@ class RuleResultResponse(BaseModel):
 class ValidationRunResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: str
-    deal_id: str
+    deal_id: str | None
+    target_type: str | None
+    target_id: str | None
     checklist_id: str | None
     status: ValidationRunStatus
     total_rules: int
@@ -39,7 +41,8 @@ class ValidationRunResponse(BaseModel):
 
 class ValidationTriggerResponse(BaseModel):
     validation_run_id: str
-    deal_id: str
+    deal_id: str | None = None
+    order_id: str | None = None
     message: str = "Validation started"
 
 
