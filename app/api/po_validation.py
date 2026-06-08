@@ -82,7 +82,7 @@ def get_po_validation_checklist(
             })
             
         po_link_status = formatted_order.get("po_link_status")
-        if po_link_status == "VERIFIED":
+        if po_link_status in ("VERIFIED", "APPROVED"):
             link_status = "pass"
         elif po_link_status:
             link_status = "warning"

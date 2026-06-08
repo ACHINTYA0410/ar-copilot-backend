@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import audit, checklists, deals, documents, purchase_orders, rules, validation, po_validation
+from app.api import audit, checklists, deals, documents, po_documents, po_reconciliation, purchase_orders, rules, validation, po_validation
 from app.config import settings
 from app.database import create_tables
 
@@ -58,6 +58,8 @@ app.include_router(audit.router, prefix=API_PREFIX)
 app.include_router(purchase_orders.router, prefix=API_PREFIX)
 app.include_router(po_validation.router, prefix=f"{API_PREFIX}/po-validation", tags=["po-validation"])
 app.include_router(po_validation.router, prefix="/api/po-validation", tags=["po-validation"])
+app.include_router(po_documents.router, prefix=API_PREFIX)
+app.include_router(po_reconciliation.router, prefix=API_PREFIX)
 
 
 

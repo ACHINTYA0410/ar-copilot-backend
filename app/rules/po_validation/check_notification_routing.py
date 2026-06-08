@@ -1,4 +1,5 @@
 from app.rules.base import BaseRule, RuleContext
+from app.rules.po_validation._groq_helper import enrich_with_groq
 from app.services.ai_service import AIService, RuleEvaluation
 
 
@@ -16,7 +17,6 @@ class CheckNotificationRoutingRule(BaseRule):
         )
 
     async def evaluate(self, context: RuleContext, ai_service: AIService) -> RuleEvaluation:
-        # Delegates to the mocked AI service so the lookup hits _PO_RESPONSES in ai_service
         from app.models.rule import Rule, ActionOnFail
 
         rule_obj = Rule(
@@ -29,4 +29,7 @@ class CheckNotificationRoutingRule(BaseRule):
             action_on_fail=ActionOnFail.flag_review,
         )
         po_context = {"order_id": context.deal_id, **context.deal_data}
-        return await ai_service.evaluate_po_rule(rule_obj, po_context)
+        # ai_service.evaluate_po_rule gives us the deterministic/mock status
+        result = await ai_service.evaluate_po_rule(rule_obj, po_context)
+
+        return await enrich_with_groq(result, self.name, self._get_prompt(), context.deal_data)

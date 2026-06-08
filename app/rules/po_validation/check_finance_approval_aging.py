@@ -1,4 +1,5 @@
 from app.rules.base import BaseRule, RuleContext
+from app.rules.po_validation._groq_helper import enrich_with_groq
 from app.services.ai_service import AIService, RuleEvaluation
 
 _AGING_WARN_THRESHOLD_MINUTES = 30
@@ -22,25 +23,23 @@ class CheckFinanceApprovalAgingRule(BaseRule):
         aging = po.get("approval_aging_minutes")
 
         if status != "FIN_HOLD":
-            return RuleEvaluation(
+            result = RuleEvaluation(
                 status="pass",
                 confidence=1.0,
                 evidence=f"PO status is {status} — Finance aging check not applicable.",
                 reasoning="Rule only triggers when the PO is in FIN_HOLD. No action required.",
                 runtime_ms=0,
             )
-
-        if aging is None:
-            return RuleEvaluation(
+        elif aging is None:
+            result = RuleEvaluation(
                 status="pass",
                 confidence=0.85,
                 evidence="PO is in FIN_HOLD but approval_aging_minutes is not recorded.",
                 reasoning="Cannot determine aging without the timestamp. Treating as non-blocking.",
                 runtime_ms=0,
             )
-
-        if aging > _AGING_WARN_THRESHOLD_MINUTES:
-            return RuleEvaluation(
+        elif aging > _AGING_WARN_THRESHOLD_MINUTES:
+            result = RuleEvaluation(
                 status="warning",
                 confidence=0.9,
                 evidence=(
@@ -53,11 +52,13 @@ class CheckFinanceApprovalAgingRule(BaseRule):
                 ),
                 runtime_ms=0,
             )
+        else:
+            result = RuleEvaluation(
+                status="pass",
+                confidence=0.95,
+                evidence=f"PO is in FIN_HOLD for {aging} minutes — within acceptable wait time.",
+                reasoning=f"Aging ({aging} min) is below the {_AGING_WARN_THRESHOLD_MINUTES}-minute threshold. No action needed yet.",
+                runtime_ms=0,
+            )
 
-        return RuleEvaluation(
-            status="pass",
-            confidence=0.95,
-            evidence=f"PO is in FIN_HOLD for {aging} minutes — within acceptable wait time.",
-            reasoning=f"Aging ({aging} min) is below the {_AGING_WARN_THRESHOLD_MINUTES}-minute threshold. No action needed yet.",
-            runtime_ms=0,
-        )
+        return await enrich_with_groq(result, self.name, self._get_prompt(), po)

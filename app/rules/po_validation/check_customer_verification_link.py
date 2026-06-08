@@ -1,4 +1,5 @@
 from app.rules.base import BaseRule, RuleContext
+from app.rules.po_validation._groq_helper import enrich_with_groq
 from app.services.ai_service import AIService, RuleEvaluation
 
 
@@ -22,7 +23,7 @@ class CheckCustomerVerificationLinkRule(BaseRule):
         customer = po.get("customer_name", "the customer")
 
         if order_status == "FIN_APPROVED" and link_status is None:
-            return RuleEvaluation(
+            result = RuleEvaluation(
                 status="fail",
                 confidence=0.97,
                 evidence="PO is Finance-approved but no verification link has been sent to the customer.",
@@ -33,9 +34,8 @@ class CheckCustomerVerificationLinkRule(BaseRule):
                 ),
                 runtime_ms=0,
             )
-
-        if link_status == "INACTIVE":
-            return RuleEvaluation(
+        elif link_status == "INACTIVE":
+            result = RuleEvaluation(
                 status="warning",
                 confidence=0.88,
                 evidence=f"Verification link for {customer} is INACTIVE — customer may not have received it.",
@@ -45,18 +45,16 @@ class CheckCustomerVerificationLinkRule(BaseRule):
                 ),
                 runtime_ms=0,
             )
-
-        if link_status == "APPROVED":
-            return RuleEvaluation(
+        elif link_status == "APPROVED":
+            result = RuleEvaluation(
                 status="pass",
                 confidence=0.99,
                 evidence=f"Customer {customer} approved via verification link (approved on {approved_on}).",
                 reasoning="Link status APPROVED confirms the customer acknowledged and accepted the PO.",
                 runtime_ms=0,
             )
-
-        if link_status == "ACTIVE" and not approved_on:
-            return RuleEvaluation(
+        elif link_status == "ACTIVE" and not approved_on:
+            result = RuleEvaluation(
                 status="warning",
                 confidence=0.82,
                 evidence=f"Verification link sent to {customer} but customer has not approved yet.",
@@ -66,11 +64,13 @@ class CheckCustomerVerificationLinkRule(BaseRule):
                 ),
                 runtime_ms=0,
             )
+        else:
+            result = RuleEvaluation(
+                status="pass",
+                confidence=0.90,
+                evidence=f"Verification link status is {link_status!r} — no issues detected.",
+                reasoning="Verification link state is acceptable for the current order status.",
+                runtime_ms=0,
+            )
 
-        return RuleEvaluation(
-            status="pass",
-            confidence=0.90,
-            evidence=f"Verification link status is {link_status!r} — no issues detected.",
-            reasoning="Verification link state is acceptable for the current order status.",
-            runtime_ms=0,
-        )
+        return await enrich_with_groq(result, self.name, self._get_prompt(), po)
